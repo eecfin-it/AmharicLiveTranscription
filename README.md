@@ -2,7 +2,60 @@
 
 Real-time Amharic speech transcription displayed as a lower-third overlay in ProPresenter 7.9+ via its HTTP API.
 
-**Pipeline:** Microphone (SoX) → Google Cloud Speech-to-Text → Text Formatter → ProPresenter HTTP API
+## Overview
+
+This application captures live audio from a microphone, sends it to Google Cloud Speech-to-Text for Amharic transcription, formats the recognized text into display-friendly lines, and pushes it to ProPresenter as a lower-third message overlay — all in real time. It is designed for live church services, conferences, or any event where Amharic speech needs to be transcribed and displayed on screen.
+
+### How the Pipeline Works
+
+```
+┌─────────────┐     ┌──────────────────────┐     ┌───────────────┐     ┌──────────────┐
+│  Microphone  │────▶│  Google Cloud STT     │────▶│  Text          │────▶│ ProPresenter  │
+│  (SoX)       │     │  (Streaming API)      │     │  Formatter     │     │ (HTTP API)    │
+└─────────────┘     └──────────────────────┘     └───────────────┘     └──────────────┘
+   16kHz PCM            am-ET language              Word wrapping         Lower-third
+   audio stream         Interim + Final results     2-line display        on screen
+```
+
+#### Stage 1: Microphone Capture (SoX)
+
+The app uses [node-record-lpcm16](https://www.npmjs.com/package/node-record-lpcm16) with [SoX](https://sox.sourceforge.net/) to capture raw audio from the system's default microphone. Audio is recorded as **16-bit Linear PCM at 16kHz** — the format Google Cloud Speech-to-Text expects. The mic stream runs continuously and is never stopped during STT stream restarts, ensuring zero audio gaps.
+
+#### Stage 2: Google Cloud Speech-to-Text (Streaming)
+
+The raw PCM audio is piped into Google Cloud's `streamingRecognize` API configured for Amharic (`am-ET`). The API returns two types of results:
+
+- **Interim results** — partial transcriptions that update rapidly as speech is recognized. These give the audience a sense of real-time captioning, even before a sentence is complete.
+- **Final results** — confirmed transcriptions that won't change. These are committed to a buffer for display.
+
+Key behaviors:
+- **Auto-restart**: Google enforces a 5-minute limit on streaming sessions. The app proactively restarts the stream every 4.5 minutes, seamlessly reconnecting without dropping audio.
+- **Error recovery**: On gRPC `OUT_OF_RANGE` errors (code 11, Google's stream reset), the app automatically reconnects.
+- **Speech contexts**: The app sends hint phrases (Amharic theological vocabulary) to boost recognition accuracy for domain-specific words like ኢየሱስ (Jesus), ክርስቶስ (Christ), and እግዚአብሔር (God).
+
+#### Stage 3: Text Formatter
+
+The formatter takes raw transcription text and prepares it for display on screen:
+
+- **Interim mode**: Shows the last N words (configurable via `WORDS_PER_LINE`) on a single line. This updates rapidly to show what's being said right now.
+- **Final mode**: Commits words to a rolling buffer and displays the last 2 lines of N words each. This creates a stable, readable lower-third.
+- Amharic (Ge'ez script) is space-separated like Latin text, so standard word splitting works correctly.
+
+#### Stage 4: ProPresenter HTTP API
+
+The formatted text is pushed to ProPresenter's HTTP API on every transcription event:
+
+1. **PUT** `/v1/message/{uuid}` — updates the message body with the new transcript text
+2. **POST** `/v1/message/{uuid}/trigger` — triggers the message to display on screen
+
+When silence is detected (no speech for `CLEAR_AFTER_SILENCE_MS`), the app calls **GET** `/v1/message/{uuid}/clear` to remove the lower-third from screen.
+
+On first startup, the app automatically:
+- Creates the message in ProPresenter if it doesn't exist (by `PROPRESENTER_MESSAGE_NAME`)
+- Looks up the configured theme slide by name (e.g. "Lower 3rd Lyrics") from all available themes
+- Applies the theme to the message
+
+No manual UUID copying or token setup is needed.
 
 ## Prerequisites
 
@@ -22,41 +75,71 @@ Real-time Amharic speech transcription displayed as a lower-third overlay in Pro
 
 ## Setup
 
-1. **Clone and install**
+### 1. Clone and install
 
-   ```bash
-   git clone <repo-url> && cd amharic-transcriber
-   npm install
-   ```
+```bash
+git clone <repo-url> && cd amharic-transcriber
+npm install
+```
 
-2. **Google Cloud credentials**
+### 2. Google Cloud credentials
 
-   - Create a service account in the [Google Cloud Console](https://console.cloud.google.com/)
-   - Enable the **Cloud Speech-to-Text API**
-   - Download the JSON key file and save it as `google-credentials.json` in the project root
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (or select an existing one)
+3. Enable the **Cloud Speech-to-Text API**:
+   - Navigate to APIs & Services → Library
+   - Search for "Cloud Speech-to-Text API"
+   - Click **Enable**
+4. Create a service account:
+   - Navigate to IAM & Admin → Service Accounts
+   - Click **Create Service Account**
+   - Give it a name (e.g. "amharic-transcriber")
+   - Grant the role **Cloud Speech Client**
+5. Generate a key:
+   - Click on the service account → Keys → Add Key → Create new key → JSON
+   - Download the JSON file and save it as `google-credentials.json` in the project root
 
-3. **Enable ProPresenter Network API**
+### 3. Enable ProPresenter Network API
 
-   - Open ProPresenter → Preferences → Network
-   - Enable the Network API and note the port (default: `1025`)
+1. Open ProPresenter → **Preferences → Network**
+2. Enable the **Network** toggle
+3. Note the port number (default: `1025`)
+4. The API will be available at `http://<machine-ip>:<port>`
 
-4. **Configure environment**
+To verify, open a browser and go to `http://localhost:1025/version` — you should see a JSON response with your ProPresenter version.
 
-   ```bash
-   cp .env.example .env
-   ```
+### 4. Configure environment
 
-   Edit `.env`:
+```bash
+cp .env.example .env
+```
 
-   | Variable | Description | Default |
-   |----------|-------------|---------|
-   | `GOOGLE_APPLICATION_CREDENTIALS` | Path to your Google JSON key file | `./google-credentials.json` |
-   | `PROPRESENTER_BASE_URL` | ProPresenter API base URL | `http://127.0.0.1:1025` |
-   | `PROPRESENTER_MESSAGE_NAME` | Name of the message (auto-created if missing) | `Amharic Live Transcription API` |
-   | `PROPRESENTER_THEME_SLIDE` | Theme slide name to apply (looked up from all themes) | `Lower 3rd Lyrics` |
-   | `WORDS_PER_LINE` | Max words per display line | `8` |
-   | `CLEAR_AFTER_SILENCE_MS` | Clear text after N ms of silence | `4000` |
-   | `LANGUAGE_CODE` | BCP-47 language code | `am-ET` |
+Edit `.env`:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to your Google JSON key file | `./google-credentials.json` |
+| `PROPRESENTER_BASE_URL` | ProPresenter API base URL | `http://127.0.0.1:1025` |
+| `PROPRESENTER_MESSAGE_NAME` | Name of the message (auto-created if missing) | `Amharic Live Transcription API` |
+| `PROPRESENTER_THEME_SLIDE` | Theme slide name to apply (looked up from all themes) | `Lower 3rd Lyrics` |
+| `WORDS_PER_LINE` | Max words per display line | `8` |
+| `CLEAR_AFTER_SILENCE_MS` | Clear text after N ms of silence | `4000` |
+| `LANGUAGE_CODE` | BCP-47 language code | `am-ET` |
+
+### 5. Verify your setup
+
+Test each component individually before running:
+
+```bash
+# Test SoX can record audio (Ctrl+C to stop)
+sox -d -r 16000 -c 1 -b 16 test.wav
+
+# Test Google credentials
+node -e "const s = require('@google-cloud/speech'); new s.SpeechClient().initialize().then(() => console.log('OK'))"
+
+# Test ProPresenter API
+curl http://localhost:1025/version
+```
 
 ## Usage
 
@@ -75,29 +158,10 @@ On startup the app will:
 3. Look up the theme slide by `PROPRESENTER_THEME_SLIDE` and apply it to the message
 4. Start capturing audio from the default microphone via SoX
 5. Stream audio to Google Cloud Speech-to-Text and push transcriptions to ProPresenter in real time
+6. Clear the lower-third after `CLEAR_AFTER_SILENCE_MS` of silence
+7. On Ctrl+C: stop the mic, clear the lower-third, and exit cleanly
 
-## How It Works
-
-```
-Microphone (16 kHz PCM via SoX)
-  │
-  ▼
-Google Cloud Speech-to-Text (streaming, am-ET)
-  │  interim results ──▶ formatter.interim() ──▶ ProPresenter showText()
-  │  final results   ──▶ formatter.update()  ──▶ ProPresenter showText()
-  │
-  ▼
-Silence timer (configurable) ──▶ ProPresenter clearText()
-```
-
-- **Interim results** update rapidly as speech is recognized (single line, last N words)
-- **Final results** are committed to a rolling buffer and displayed as up to 2 lines
-- After a configurable silence period, the lower-third is cleared
-- The STT stream auto-restarts every 4.5 minutes (before Google's 5-minute limit)
-- Reconnects automatically on gRPC stream-reset errors (code 11)
-- Graceful shutdown on SIGINT/SIGTERM: stops mic, clears ProPresenter
-
-## ProPresenter API Details
+## ProPresenter API Reference
 
 The app uses ProPresenter's HTTP API (tested on 7.15):
 
@@ -111,8 +175,6 @@ The app uses ProPresenter's HTTP API (tested on 7.15):
 | List themes | `GET` | `/v1/themes` |
 | Check version | `GET` | `/version` |
 
-The message text is updated via PUT on every transcription event, then triggered to display. No manual message UUID or token setup is needed — the app handles everything.
-
 ## Available Theme Slides
 
 To change the lower-third style, set `PROPRESENTER_THEME_SLIDE` in `.env` to any slide name from your ProPresenter themes. Common options from stock themes:
@@ -125,7 +187,11 @@ To change the lower-third style, set `PROPRESENTER_THEME_SLIDE` in `.env` to any
 | `Two Lines` | Full-width two-line overlay |
 | `Lyrics` | Full-screen lyrics style |
 
-Browse all available slides: `curl http://localhost:1025/v1/themes | python3 -m json.tool`
+Browse all available slides:
+
+```bash
+curl http://localhost:1025/v1/themes | python3 -m json.tool
+```
 
 ## Custom Amharic Vocabulary (Speech Contexts)
 
@@ -161,18 +227,22 @@ Install the font on the ProPresenter machine, then select it in your message's t
 src/
 ├── index.ts         — entry point, env config, event wiring, silence timer
 ├── transcriber.ts   — Google Cloud STT streaming client with auto-restart
-├── propresenter.ts  — ProPresenter HTTP API client (message CRUD, trigger, clear)
-├── formatter.ts     — chunks Amharic text into display lines
+├── propresenter.ts  — ProPresenter HTTP API client (message CRUD, trigger, clear, theme lookup)
+├── formatter.ts     — chunks Amharic text into display lines (interim + final modes)
 └── types.d.ts       — type declarations for node-record-lpcm16
 ```
 
 ## Troubleshooting
 
-- **"Could not reach ProPresenter"** — Ensure ProPresenter is running and the Network API is enabled in Preferences → Network. Verify the port matches `PROPRESENTER_BASE_URL`.
-- **No audio / "spawn sox ENOENT"** — Install SoX: `brew install sox` (macOS) or `sudo apt install sox` (Linux).
-- **"Invalid recognition config"** — The `default` STT model is used for `am-ET`. If you change `LANGUAGE_CODE`, the model may need adjusting in `src/transcriber.ts`.
-- **English words in transcription** — Google STT for Amharic may produce some English when ambient noise is present. Speak clearly and close to the microphone for best results.
-- **Stream restarts** — The STT stream auto-restarts every 4.5 minutes. This is normal and seamless — the mic stays active.
+| Problem | Solution |
+|---------|----------|
+| "Could not reach ProPresenter" | Ensure ProPresenter is running and Network API is enabled in Preferences → Network. Verify the port matches `PROPRESENTER_BASE_URL`. |
+| No audio / "spawn sox ENOENT" | Install SoX: `brew install sox` (macOS) or `sudo apt install sox` (Linux). |
+| "Invalid recognition config" | The `default` STT model is used for `am-ET`. If you change `LANGUAGE_CODE`, the model may need adjusting in `src/transcriber.ts`. |
+| English words in transcription | Google STT for Amharic may produce some English with ambient noise. Speak clearly and close to the microphone. Add more speech context hints. |
+| Stream restarts every ~4.5 min | This is normal. Google enforces a 5-minute streaming limit. The app restarts seamlessly without audio loss. |
+| Lower-third flickers | Reduce `WORDS_PER_LINE` or increase `CLEAR_AFTER_SILENCE_MS` to stabilize display updates. |
+| Theme not applied | Verify the slide name in `PROPRESENTER_THEME_SLIDE` exactly matches a slide in your ProPresenter themes (case-sensitive). Run `curl http://localhost:1025/v1/themes` to list all available slides. |
 
 ## License
 
