@@ -1,0 +1,21 @@
+{
+  "name": "amharic-transcriber",
+  "version": "1.0.0",
+  "description": "Live Amharic speech transcription to ProPresenter lower-thirds",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@google-cloud/speech": "^6.7.0",
+    "dotenv": "^16.4.7",
+    "node-record-lpcm16": "^1.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
+  }
+}
