@@ -76,8 +76,7 @@ export class Transcriber extends EventEmitter {
         encoding: "LINEAR16" as unknown as AudioEncoding,
         sampleRateHertz: this.config.sampleRateHertz ?? 16000,
         languageCode: this.config.languageCode,
-        model: "latest_long",
-        useEnhanced: true,
+        model: "default",
         enableAutomaticPunctuation: true,
         speechContexts: this.config.speechContexts ?? [],
       },
@@ -105,9 +104,11 @@ export class Transcriber extends EventEmitter {
         }
       });
 
-    // Pipe mic audio into the STT stream
+    // Pipe mic audio into the STT stream.
+    // { end: false } keeps the mic readable alive when the STT writable closes,
+    // which is critical for seamless stream restarts.
     if (this.recording) {
-      this.recording.stream().pipe(this.recognizeStream as any);
+      this.recording.stream().pipe(this.recognizeStream as any, { end: false });
     }
 
     // Schedule a proactive restart before the 5-min hard limit
@@ -122,6 +123,10 @@ export class Transcriber extends EventEmitter {
       this.restartTimer = null;
     }
     if (this.recognizeStream) {
+      // Unpipe mic before destroying so it doesn't write to a dead stream
+      if (this.recording) {
+        this.recording.stream().unpipe(this.recognizeStream as any);
+      }
       this.recognizeStream.removeAllListeners();
       this.recognizeStream.destroy();
       this.recognizeStream = null;

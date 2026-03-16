@@ -21,9 +21,15 @@ function optionalEnv(name: string, fallback: string): string {
 
 /* ── config ────────────────────────────────────────────── */
 
-const PROPRESENTER_HOST = requireEnv("PROPRESENTER_HOST");
-const PROPRESENTER_PORT = parseInt(requireEnv("PROPRESENTER_PORT"), 10);
-const PROPRESENTER_MESSAGE_ID = requireEnv("PROPRESENTER_MESSAGE_ID");
+const PROPRESENTER_BASE_URL = requireEnv("PROPRESENTER_BASE_URL");
+const PROPRESENTER_MESSAGE_NAME = optionalEnv(
+  "PROPRESENTER_MESSAGE_NAME",
+  "Amharic Live Transcription API"
+);
+const PROPRESENTER_THEME_SLIDE = optionalEnv(
+  "PROPRESENTER_THEME_SLIDE",
+  "Lower 3rd Lyrics"
+);
 const WORDS_PER_LINE = parseInt(optionalEnv("WORDS_PER_LINE", "8"), 10);
 const CLEAR_AFTER_SILENCE_MS = parseInt(
   optionalEnv("CLEAR_AFTER_SILENCE_MS", "4000"),
@@ -37,8 +43,9 @@ console.log(`
 ╔══════════════════════════════════════════════╗
 ║        Amharic Live Transcriber              ║
 ╠══════════════════════════════════════════════╣
-║  ProPresenter : ${PROPRESENTER_HOST}:${String(PROPRESENTER_PORT).padEnd(27)}║
-║  Message ID   : ${PROPRESENTER_MESSAGE_ID.slice(0, 27).padEnd(27)}║
+║  ProPresenter : ${PROPRESENTER_BASE_URL.slice(0, 27).padEnd(27)}║
+║  Message      : ${PROPRESENTER_MESSAGE_NAME.slice(0, 27).padEnd(27)}║
+║  Theme Slide  : ${PROPRESENTER_THEME_SLIDE.slice(0, 27).padEnd(27)}║
 ║  Language      : ${LANGUAGE_CODE.padEnd(26)}║
 ║  Words/Line    : ${String(WORDS_PER_LINE).padEnd(26)}║
 ║  Silence Clear : ${String(CLEAR_AFTER_SILENCE_MS).padEnd(23)} ms ║
@@ -48,9 +55,9 @@ console.log(`
 /* ── components ────────────────────────────────────────── */
 
 const pro = new ProPresenter({
-  host: PROPRESENTER_HOST,
-  port: PROPRESENTER_PORT,
-  messageId: PROPRESENTER_MESSAGE_ID,
+  baseUrl: PROPRESENTER_BASE_URL,
+  messageName: PROPRESENTER_MESSAGE_NAME,
+  themeSlideName: PROPRESENTER_THEME_SLIDE,
 });
 
 const formatter = new TextFormatter(WORDS_PER_LINE);
@@ -150,11 +157,23 @@ process.on("SIGTERM", shutdown);
     const version = await pro.ping();
     console.log(`[ok] ProPresenter connected — ${version}`);
   } catch (err: any) {
-    console.warn(
-      `[warn] Could not reach ProPresenter at ${PROPRESENTER_HOST}:${PROPRESENTER_PORT}`
-    );
+    console.warn(`[warn] Could not reach ProPresenter at ${PROPRESENTER_BASE_URL}`);
     console.warn(`       ${err.message}`);
     console.warn("       Continuing anyway — will retry on each push.\n");
+  }
+
+  // Find or create the message in ProPresenter
+  try {
+    const result = await pro.ensureMessage();
+    const verb = result.created ? "Created" : "Found";
+    console.log(
+      `[ok] ${verb} message "${result.messageName}" (${result.messageId})` +
+        (result.themeName ? `, theme: "${result.themeName}"` : "")
+    );
+  } catch (err: any) {
+    console.error(`[error] Could not ensure message: ${err.message}`);
+    console.error("        Create the message manually in ProPresenter.");
+    process.exit(1);
   }
 
   console.log("[mic] Starting microphone capture (SoX)…");

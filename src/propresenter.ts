@@ -1,56 +1,141 @@
 import http from "http";
 
 export interface ProPresenterConfig {
-  host: string;
-  port: number;
-  messageId: string;
+  baseUrl: string;
+  messageName: string;
+  themeSlideName: string;
 }
 
 export class ProPresenter {
-  private host: string;
-  private port: number;
-  private messageId: string;
+  private baseUrl: string;
+  private messageName: string;
+  private themeSlideName: string;
+  private messageId = "";
+  private themeId = "";
+  private themeName = "";
 
   constructor(config: ProPresenterConfig) {
-    this.host = config.host;
-    this.port = config.port;
-    this.messageId = config.messageId;
+    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.messageName = config.messageName;
+    this.themeSlideName = config.themeSlideName;
   }
 
   /* ── public API ──────────────────────────────────────── */
 
-  /** Push text into the message's token fields and trigger it on-screen. */
+  /**
+   * Find an existing message by name, or create one.
+   * Then resolve the theme slide by name and apply it.
+   * Must be called before showText/clearText.
+   */
+  async ensureMessage(): Promise<{
+    messageId: string;
+    messageName: string;
+    themeName: string;
+    created: boolean;
+  }> {
+    // 1. Find or create the message
+    const body = await this.request("GET", "/v1/messages");
+    const messages: any[] = body ? JSON.parse(body) : [];
+    const existing = messages.find(
+      (m: any) => m.id?.name === this.messageName
+    );
+
+    let created = false;
+    if (existing) {
+      this.messageId = existing.id.uuid;
+      this.themeId = existing.theme?.uuid ?? "";
+      this.themeName = existing.theme?.name ?? "";
+    } else {
+      const createdBody = await this.request("POST", "/v1/messages", {
+        id: { name: this.messageName },
+        message: "",
+        tokens: [],
+        theme: { name: "", uuid: "" },
+      });
+      if (!createdBody) {
+        throw new Error(
+          "ProPresenter returned empty response when creating message"
+        );
+      }
+      const msg = JSON.parse(createdBody);
+      this.messageId = msg.id.uuid;
+      this.themeId = msg.theme?.uuid ?? "";
+      this.themeName = msg.theme?.name ?? "";
+      created = true;
+    }
+
+    // 2. Resolve and apply theme slide if configured
+    if (this.themeSlideName) {
+      const slide = await this.findThemeSlide(this.themeSlideName);
+      if (slide) {
+        this.themeId = slide.uuid;
+        this.themeName = slide.name;
+        // Apply theme to message
+        await this.request("PUT", `/v1/message/${this.messageId}`, {
+          id: { name: this.messageName, uuid: this.messageId },
+          message: "",
+          tokens: [],
+          theme: { name: this.themeName, uuid: this.themeId },
+        });
+      }
+    }
+
+    return {
+      messageId: this.messageId,
+      messageName: this.messageName,
+      themeName: this.themeName,
+      created,
+    };
+  }
+
+  /** Update message text and trigger it on the main/stream output. */
   async showText(text: string): Promise<void> {
-    const tokens = this.buildTokens(text);
-    await this.request("PUT", `/v1/message/${this.messageId}/tokens`, tokens);
-    await this.request("PUT", `/v1/message/${this.messageId}/trigger`);
+    await this.request("PUT", `/v1/message/${this.messageId}`, {
+      id: { name: this.messageName, uuid: this.messageId },
+      message: text,
+      tokens: [],
+      theme: { name: this.themeName, uuid: this.themeId },
+    });
+    await this.request(
+      "POST",
+      `/v1/message/${this.messageId}/trigger`,
+      []
+    );
   }
 
   /** Clear the message from screen. */
   async clearText(): Promise<void> {
-    await this.request("DELETE", `/v1/message/${this.messageId}/trigger`);
+    await this.request("GET", `/v1/message/${this.messageId}/clear`);
   }
 
   /** Verify connectivity — resolves with version string, rejects on failure. */
   async ping(): Promise<string> {
-    const body = await this.request("GET", "/v1/version");
+    const body = await this.request("GET", "/version");
     return body;
   }
 
   /* ── internals ───────────────────────────────────────── */
 
-  private buildTokens(text: string): object {
-    // ProPresenter message tokens: array of token objects with name "Text"
-    // and a value containing text with colour information.
-    return [
-      {
-        name: "Text",
-        text: {
-          text,
-          color: { red: 1, green: 1, blue: 1, alpha: 1 }, // white
-        },
-      },
-    ];
+  /**
+   * Search all themes for a slide matching the given name.
+   * Returns { uuid, name } or null if not found.
+   */
+  private async findThemeSlide(
+    slideName: string
+  ): Promise<{ uuid: string; name: string } | null> {
+    const body = await this.request("GET", "/v1/themes");
+    if (!body) return null;
+    const data = JSON.parse(body);
+    for (const group of data.groups ?? []) {
+      for (const theme of group.themes ?? []) {
+        for (const slide of theme.slides ?? []) {
+          if (slide.id?.name === slideName) {
+            return { uuid: slide.id.uuid, name: slide.id.name };
+          }
+        }
+      }
+    }
+    return null;
   }
 
   private request(
@@ -59,12 +144,13 @@ export class ProPresenter {
     body?: object
   ): Promise<string> {
     return new Promise((resolve, reject) => {
+      const url = new URL(path, this.baseUrl);
       const payload = body ? JSON.stringify(body) : undefined;
 
       const options: http.RequestOptions = {
-        hostname: this.host,
-        port: this.port,
-        path,
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
         method,
         headers: {
           "Content-Type": "application/json",
